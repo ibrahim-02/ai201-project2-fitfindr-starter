@@ -217,8 +217,10 @@ I'll give groq the Tool 2 spec and the `wardrobe_schema.json` structure, and ask
 I'll give groq the Tool 3 spec and ask it to write a prompt that instructs the LLM to generate a casual Gen Z caption mentioning the item name, price, and platform. I'll set a higher temperature (0.9) for variety. I'll verify the guard against an empty outfit string, then test it with two different outfits to confirm the captions feel distinct.
 
 **Milestone 3 — Individual tool implementations:**
+I used Claude (Claude Code) for all three tools. For each tool I pasted the relevant spec block from this planning.md — the function name, inputs with types, return value description, and failure mode — and asked it to implement that single function in `tools.py` using `load_listings()` from `utils/data_loader.py` where applicable. I reviewed each generated function before running it by checking: (1) do the parameter names and types match the spec exactly? (2) does the failure mode branch exist? (3) does it return the correct type? I then ran the tool in isolation with three test inputs before wiring it into the agent.
 
 **Milestone 4 — Planning loop and state management:**
+I used Claude (Claude Code) and gave it the Planning Loop section, State Management section, and the architecture diagram from this file. I asked it to implement `run_agent()` in `agent.py` following the numbered TODO steps already in the stub. Before accepting the output I checked: (1) does the loop branch on the result of `search_listings` — i.e. does it NOT call `suggest_outfit` when results are empty? (2) does every tool call read its inputs from `session` and write its output back to `session`? (3) does the no-results path set `session["error"]` and return immediately? I verified by patching `suggest_outfit` and `create_fit_card` to raise exceptions — if either was called on the no-results path, the patch would crash the test.
 
 ---
 
@@ -228,14 +230,33 @@ Write out what a full user interaction looks like from start to finish — tool 
 
 **Example user query:** "I'm looking for a vintage graphic tee under $30. I mostly wear baggy jeans and chunky sneakers. What's out there and how would I style it?"
 
-**Step 1:**
-<!-- What does the agent do first? Which tool is called? With what input? -->
+**Step 1: Parse the query (planning loop — no tool call)**
+The planning loop uses regex to extract structured parameters from the natural language query:
+- `description = "vintage graphic tee"` (keywords remaining after stripping price/size phrases)
+- `max_price = 30.0` (extracted from "under $30")
+- `size = None` (no size mentioned)
 
-**Step 2:**
-<!-- What happens next? What was returned from step 1? What tool is called now? -->
+These are stored in `session["parsed"]`. No LLM call is made here.
 
-**Step 3:**
-<!-- Continue until the full interaction is complete -->
+**Step 2: Call `search_listings(description="vintage graphic tee", size=None, max_price=30.0)`**
+The tool loads all 40 listings, filters out any priced above $30, then scores each remaining listing by counting how many of the keywords (`"vintage"`, `"graphic"`, `"tee"`) appear in the listing's title, description, style_tags, colors, and category. Listings with a score of 0 are dropped. The remaining listings are sorted by score, highest first.
+
+Returned: a list of matching listing dicts. The top result is the **Y2K Baby Tee — Butterfly Print** (score: 3 keyword hits, price: $18, platform: depop). This list is stored in `session["search_results"]` and the top item is stored in `session["selected_item"]`.
+
+**Step 3: Call `suggest_outfit(new_item=session["selected_item"], wardrobe=session["wardrobe"])`**
+The tool checks that `wardrobe["items"]` is non-empty (the example wardrobe has 10 items). It formats the wardrobe as a bulleted list and sends a prompt to the Groq LLM (`llama-3.3-70b-versatile`) asking for 1–2 outfit combinations that pair the Y2K Baby Tee with specific named wardrobe pieces, with styling rationale for each.
+
+Returned (stored in `session["outfit_suggestion"]`):
+> "Outfit 1: Pair the Y2K Baby Tee with the Baggy straight-leg jeans and Chunky white sneakers. The dark wash jeans ground the pastel butterfly print... Outfit 2: Layer with the Vintage black denim jacket and Black combat boots for a grunge-Y2K mix..."
+
+**Step 4: Call `create_fit_card(outfit=session["outfit_suggestion"], new_item=session["selected_item"])`**
+The tool checks that `outfit` is non-empty (it is), then sends a prompt to the Groq LLM at temperature 0.9, asking for a 2–4 sentence Gen Z OOTD caption that mentions the item name, $18 price, and Depop platform once each.
+
+Returned (stored in `session["fit_card"]`):
+> "Just scored this Y2K Baby Tee — Butterfly Print for $18 on Depop and I'm obsessed. Paired it with my baggy straight-leg jeans and chunky white sneakers and the vibe is exactly what I needed."
 
 **Final output to user:**
-<!-- What does the user actually see at the end? -->
+The Gradio UI displays three panels side by side:
+- **Panel 1 (Top listing found):** Title, price ($18), platform (depop), size (S/M), condition (excellent), colors (white, pink, purple), style tags (y2k, vintage, graphic tee, cottagecore), and the seller's description.
+- **Panel 2 (Outfit idea):** The full outfit suggestion naming specific wardrobe pieces and explaining color harmony and silhouette balance.
+- **Panel 3 (Your fit card):** The 2–4 sentence caption ready to copy and post.
